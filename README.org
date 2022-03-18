@@ -255,10 +255,12 @@ I do actively use Remotely to configure my main private VPS, which I use to host
 and a number of private self-hosted services. You can find the full configuration at
 [[https://github.com/markasoftware/swirl][github.com/markasoftware/swirl]]. The services I manage with Remotely include
 + Syncthing (file sync)
-+ Shadowsocks (proxy)
 + Quassel (IRC bouncer)
 + Navidrome (music server)
 + Transmission (bittorrent client)
++ Shadowsocks (proxy)
++ Wireguard (VPN; restricts access to Syncthing, Quassel, Navidrome,
+  Transmission, etc)
 + Nginx (web server)
 + Certbot (for Letsencrypt SSL certificates)
 + Iptables (firewall)

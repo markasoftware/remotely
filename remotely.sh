@@ -120,12 +120,12 @@ function process_m4_templates {
     LDIR=${LDIR:-$(dirname "${BASH_SOURCE[0]}")/files}
     LDIR=${LDIR%/}
     LDIR="${LDIR}/."
-    # TODO: fix when LDIR has an apostrophe in it
-    trap "find '$LDIR' -name '*.m4' -print0 | sed -z 's/.m4$//' | xargs -0 rm -f" EXIT
+    remotely_m4_preamble_file=$(mktemp)
+    # TODO: fix when LDIR or preamble file contains apostrophe
+    trap "find '$LDIR' -name '*.m4' -print0 | sed -z 's/.m4$//' | xargs -0 rm -f; rm -f '$remotely_m4_preamble_file'" EXIT
+    # CUSTOMIZE: Files to delete. These ones are emacs lockfiles and such
     find "$LDIR" -name '*~' -o -name '*#*' -delete
 
-    remotely_m4_preamble_file=$(mktemp)
-    trap "rm -f '$remotely_m4_preamble_file'" EXIT # Also TODO fix when apostrophe in temp
     echo "$remotely_m4_preamble" > "$remotely_m4_preamble_file"
     # use xargs instead of -exec so that errors are fatal
     find "$LDIR" -name '*.m4' -print0 | xargs -0 -L1 --no-run-if-empty -- bash -c 'm4 -P "$0" "$1" > "${1%.m4}"' "$remotely_m4_preamble_file"
