@@ -1,0 +1,378 @@
+#+TITLE: Remotely: A bash library for doing things over SSH.
+#+AUTHOR: Mark Polyakov
+
+It seems like everyone and their mother has their own DIY Ansible
+replacement these days. Remotely is mine. Since I don't manage a whole
+server farm, but rather just a few personal machines, I care more about
+simplicity and adhering to the Unix philosophy than working at scale or
+having orchestration features. Using remotely is as close as I can get
+to writing "just shell scripts" that can easily interact with a remote
+server, upload files, and supports file templating. Key features:
+
+- "Playbooks" are just shell scripts.
+- It's a bash library with less than 200 lines of code. Not a framework.
+- =rsync= for uploading files.
+- =m4= for templating.
+- Fast, agentless, and with "ssh pipelining" (control sockets).
+
+I've designed remotely for my use case, which is putting my personal
+VPS's configuration under version control. You would probably want to
+modify remotely a bit before using it on a large group of machines.
+
+Remotely isn't named "Remotely" to make it sound like a hip startup -- rather,
+it's because it lets you run commands on a remote machine using the keyword
+=remotely=, like so:
+
+#+BEGIN_SRC sh
+  remotely apt install nginx
+#+END_SRC
+
+* Getting Started
+
+I'll quickly cover the basics of using Remotely to setup [[https://github.com/shadowsocks/shadowsocks-libev][shadowsocks-libev]], a
+high performance proxy server which is often used to bypass the Great Firewall
+of China, hide network traffic from IT at work, etc.
+
+Let's start writing a Bash script that will setup shadowsocks-libev on a server
+of our choice.
+
+#+BEGIN_SRC sh
+  #!/bin/bash
+#+END_SRC
+
+Remotely will not work in shells other than Bash. Next up, let's set up
+an environment variable to tell Remotely how to connect to our server:
+
+#+BEGIN_SRC sh
+  export REMOTELY_HOST=root@17.82.99.102
+#+END_SRC
+
+You should connect to the target server as root, then de-escalate priviliges on
+a per-command basis as necessary. If your server has a special SSH configuration
+(such as a custom port), you can use ~REMOTELY_SSH_OPTIONS=-p 2222~, for
+example. Now let's load Remotely:
+
+#+BEGIN_SRC sh
+  source remotely.sh
+  remotely_go
+#+END_SRC
+
+This implies how you "install" Remotely: Just copy ~remotely.sh~ next to your
+script. You could also add this repository as a Git submodule then =source
+remotely/remotely.sh=.
+
+=remotely_go= establishes an SSH connection, which will be reused throughout the
+rest of the script to maximize performance. =remotely_go= also processes file templates,
+which I'll talk about later.
+
+#+BEGIN_SRC sh
+  remotely apt-get install -y shadowsocks-libev
+#+END_SRC
+
+Here's where the magic starts! Any command preceded by =remotely= will
+be run on the remote host.
+
+#+BEGIN_SRC sh
+  remotely systemctl start shadowsocks-libev
+  remotely systemctl enable shadowsocks-libev
+#+END_SRC
+
+At this point, the script would work. However, you'll almost always want
+to configure Shadowsocks before usage, to set a password if for no other
+reason. Let's create a =files/etc/shadowsocks-libev/config.json=
+relative to our script:
+
+#+BEGIN_EXAMPLE
+  {
+      "server":"0.0.0.0",
+      "server_port":8388,
+      "local_port":1080,
+      "password":"top sekrit",
+      "local_address":"17.82.99.102",
+      "timeout":60,
+      "method":"chacha20-ietf-poly1305"
+  }
+#+END_EXAMPLE
+
+Now, let's upload this configuration file, by inserting the following
+line before the systemd calls:
+
+#+BEGIN_SRC sh
+  upload /etc/shadowsocks-libev/config.json
+#+END_SRC
+
+The =upload= command uses =rsync= to upload the given file from the local
+=files/= directory to the same spot on the remote machine. Additionally, we
+should change =systemctl start= to =systemctl restart= so that if we change the
+configuration and re-run the script, the new configuration takes effect.
+
+There's one more important problem with this example: We hardcoded
+=password= and =local_address= into the configuration file. It's likely
+that if we wanted to use our script on multiple servers, we'd want to
+use different values for these configuration options. There's also a
+security aspect: If you want to host your script on Github, you'd better
+redact these options. Let's create a new file, which you can call
+anything, but which I'll call =vars.sh=:
+
+#+BEGIN_SRC sh
+  export REMOTELY_HOST=root@17.82.99.102
+  export SS_PASSWORD='top sekrit'
+  export SS_LOCAL_ADDR=17.82.99.102
+#+END_SRC
+
+We won't commit =vars.sh= to version control, and we will always
+=source vars.sh= before executing our main script. Now, how do we get
+those variables into =config.json=? Simple: Rename =config.json= as
+=config.json.m4=, and then use some macros:
+
+#+BEGIN_EXAMPLE
+  {
+      "server":"0.0.0.0",
+      "server_port":8388,
+      "local_port":1080,
+      "password":"m4_getenv_req(SS_PASSWORD)",
+      "local_address":"m4_getenv_req(SS_LOCAL_ADDR)",
+      "timeout":60,
+      "method":"chacha20-ietf-poly1305"
+  }
+#+END_EXAMPLE
+
+The =m4_getenv_req= macro is defined by Remotely. It looks for an
+environment variable with the given name, and if it's not found, signals
+an error. When =remotely_go= runs, it looks at all =.m4= files in the
+=files/= tree, processes =m4= macros in them, and puts the output into a
+temporary folder, with the =.m4= part of the name removed. That's all!
+=m4_getenv= and =m4_getenv_req= are the macros you'll probably use most
+often, but you can use any m4 macros you want (it's turing complete).
+The [[https://www.gnu.org/software/m4/manual/html_node/index.html][m4
+manual]] is an excellent place to start learning about m4.
+
+* Advanced Usage
+** Passing extra rsync options
+
+Any options given to =upload= after the name of the file are passed to
+rsync. For instance,
+=upload /home/good-boi -og --chown good-boi:good-boi= will upload the
+folder with ownership to =good-boi= instead of =root=.
+
+** Using Makefiles for complex tasks
+
+Remotely is convenient when the commands you're running are inherently
+idempotent. For example, running =apt-get install= on a package that's
+already installed is no big deal; it will exit as soon as it discovers
+the package is installed and does not signal any error. Certain more
+complex tasks are not so convenient to automate with shell scripting
+alone. For instance, on my personal server, I run
+[[https://github.com/deluan/navidrome][Navidrome]], a music server.
+Navidrome is not in the Debian repositories, so I need to download a
+.tar.gz, extract its contents, and then move the executable to
+/usr/local/bin. It's easy to make this work in Bash, but it probably
+won't be super fast when executed the second time; if you just use
+=curl= and =tar=, then your script will re-download the release and
+re-extract it, even if it's already installed! You could check
+explicitly whether Navidrome was downloaded or extracted previously, but
+then your code gets messy and hard to test. Instead, you can create a
+Makefile, say in =files/build/navidrome/Makefile=:
+
+#+BEGIN_EXAMPLE
+  navidrome_dir := navidrome-$(NAVIDROME_VERSION)
+  navidrome_tar := navidrome-$(NAVIDROME_VERSION).tar.gz
+  navidrome_url := https://github.com/deluan/navidrome/releases/download/v$(NAVIDROME_VERSION)/navidrome_$(NAVIDROME_VERSION)_Linux_x86_64.tar.gz
+
+  # Copy the Navidrome executable to the PATH
+  /usr/local/bin/navidrome: $(navidrome_dir)/navidrome
+      install $< $@
+
+  # Extract the Navidrome tarball
+  $(navidrome_dir)/navidrome: $(navidrome_tar)
+      mkdir -p $(navidrome_dir)
+      tar xaf $(navidrome_tar) -C $(navidrome_dir)
+      touch $@ # modification time
+
+  # Download the Navidrome tarball
+  $(navidrome_tar):
+      curl -Lo $@ '$(navidrome_url)'
+#+END_EXAMPLE
+
+Then, in my script, I simply upload this Makefile then run
+=remotely make -C /build/navidrome NAVIDROME_VERSION=0.14.0=, which
+leaves the artifacts in /build/navidrome to speed up the next run.
+
+** Splitting up your code
+
+=remotely_go= has no effect if run multiple times. Thus, one Remotely
+script can =source= another, and it will re-use the same ssh connection
+and file tree. If you don't desire this, call the subscript in a new
+process, using =bash= or by executing the script directly.
+
+The way I structure my own scripts is that I have a whole bunch of
+self-contained files which can be executed directly, named
+=go-shadowsocks.sh= to install shadowsocks, =go-networking.sh= to setup
+Wireguard and iptables, etc. These each =source remotely.sh= and
+=remotely_go=. Then, I have a =go.sh= which =source=-s each of the
+sub-files. This setup allows me to quickly update the configuration for
+small parts of my server at a time, while also allowing me to easily
+re-run the whole thing.
+
+To re-use something across many scripts, put it into a Bash function in
+a file that you can =source= from elsewhere.
+
+** SSH Word Splitting
+
+By default, =ssh= handles word splitting in a way that you probably
+don't want: All its command line arguments are joined with a space, then
+sent to the remote shell, where they're re-parsed. A command like
+=ssh root@example.com cat "'my file" " name'"= will be sent to the
+server as the string =cat 'my file name'=, and thus will print the
+content of the file named "my file name". On the other hand, executing
+=cat "'my file" " name"= locally would concatenate the file named "my
+file" with the file named " name". This behavior is justified because
+ssh is meant to be shell-agnostic, but most modern servers use Bash or
+similar, which makes this behavior cumbersome today. To remedy the
+situation, the =remotely= function adds an extra level of quotes around
+each argument. Thus, =remotely cat "'my file" " name'"= runs an ssh
+command formatted like
+=ssh root@example.com "\"cat\" \"'my file\" \" name'\""=, and the string
+that makes it to Bash on the other end is ="cat" "'my file" " name'"=,
+exactly as you intended.
+
+If you need to access remote shell features, like output redirection, you can
+disable the word splitting my using =remotely_no_escape=
+
+* Using Remotely in practice
+
+I do actively use Remotely to configure my main private VPS, which is
+probably hosting the page you're reading this on right now. You can find
+the full configuration at
+[[https://github.com/markasoftware/swirl][github.com/markasoftware/swirl]].
+The services I manage with Remotely include Syncthing (file sync), Nginx
+(website), Quassel (IRC bouncer), and Navidrome (music server).
+
+I'm pretty happy with Remotely overall, but pain points do exist; some
+pieces of software just don't play nice with shell scripts. For example,
+Quassel uses PostgreSQL, which required:
+
+#+BEGIN_SRC sh
+  remotely su - postgres -c "psql -c \"CREATE USER \\\"quassel-custom\\\" WITH PASSWORD '$QUASSEL_POSTGRES_PASSWORD'\"" || true
+  remotely su - postgres -c 'createdb --owner quassel-custom quassel-custom' || true
+#+END_SRC
+
+I had to call into =psql=, use multiple layers of escaped quotes,
+and use =|| true= to ignore errors in case the user or database already
+exist! A dedicated Postgres library for Remotely would make this easier.
+
+** Letsencrypt & Certbot
+
+Letsencrypt was a more substantial problem. While Certbot's =--nginx= plugin is
+super useful when setting up a server manually, scripting the interaction
+between certbot and nginx has always been a nightmare for me.
+
+There are two goals, and I'm not sure it's possible to satisfy both:
+1. Simplicity: Avoid a "special case" that only runs the first time the server
+   is configured.
+2. Uptime: Keep the nginx server online during certificate renewal.
+
+None of the options satisfy both requirements:
+1. Setup Nginx before Certbot using a bootstrap configuration which supports
+   HTTP only. Then run Certbot. Then reconfigure Nginx using a final
+   configuration with HTTPS.
+   - Con: Violates requirement 1: Script must be aware of whether this is the
+     "first" configuration or not, to know which Nginx configuration to apply.
+2. Run Certbot standalone the first time, then use webroot or nginx plugin
+   afterwards.
+   - Con: Violates requirement 1: Once again, the script must be aware of
+     whether this is the "first" configuration, to know whether to run Certbot
+     in standalone or webroot mode.
+3. Always run Certbot in standalone mode, and just shutdown the Nginx server for
+   a few seconds every time you need to renew your certificate.
+   - Con: Violates requirement 2: Requires at least a few seconds of downtime.
+
+For my server, requirement 1 (simplicity) is more important than requirement 2
+(uptime), so I chose the final option. By adding hooks to
+=/etc/letsencrypt/renewal-hooks= that shutdown and restart Nginx, I can always
+use Certbot standalone with barely any extra configuration. Option 2, is
+probably more suitable for production; it is just a bit more finnicky to get
+right initially. It would be great to have a Remotely library that provides such
+an option.
+
+After creating the renewal hooks, actually provisioning the certificates is as
+simple as
+
+#+BEGIN_SRC sh
+remotely certbot certonly --non-interactive --agree-tos --standalone \
+	 --cert-name my-cert -m "$LETSENCRYPT_EMAIL" -d "$LETSENCRYPT_DOMAINS"
+#+END_SRC
+
+And the nginx configuration should be hard-coded to use the SSL certificate.
+
+* Backing up a server
+  Remotely is just a library that makes it easy to do tasks involving a remote
+  server from a shell script. Thus, there's no reason to use it only for
+  configuration. I also use it to write backup scripts, and have included a
+  handful of features to make backups fun!
+  + Automatically creates new backup directories named after the current
+    date/time
+  + Uses =rsync='s excellent =--link-dest= option to perform sorta-incremental
+    backups. Files unchanged from one backup to the next will be hardlinked.
+    When a file is partially changed, parts of it that haven't changed since the
+    last backup will just be copied from the last backup. It's incredible how
+    close we can get to a full incremental backup solution using a single option
+    on a binary that's included in many linux distros.
+
+  A super simple backup script, which I use to backup all the files in my
+  ~public-html~ folder periodically, looks like this:
+
+  #+BEGIN_SRC sh
+#!/bin/bash
+
+source remotely.sh
+remotely_backup web-server
+
+backup /home/public-html/ -l
+  #+END_SRC
+
+  Instead of ~remotely_go~, I use =remotely_backup=, which creates a new backup
+  directory named after the current date/time, inside of
+  =$BACKUP_DIR/web-server=. The function ~backup~ is just like ~upload~, except
+  instead of uploading from =./files= to the remote machine, it downloads from
+  the remote machine into the current backup directory. The =-l= is just an
+  rsync option to preserve symlinks.
+
+  A more involved example is a script I use to backup a mediawiki installation.
+  Mediawiki backups involve three parts: An SQL dump of the database, an XML
+  dump of god knows what, and then a backup of remaining files (eg, images).
+
+  #+BEGIN_SRC sh
+    #!/bin/bash
+    
+    source remotely.sh
+    remotely_backup wiki
+    
+    # While sending passwords through environment variables is more or less secure in 2021, MySQL has
+    # still deprecated it. If this line breaks in the future, you know why!
+    echo "Doing mysqldump..."
+    remotely_no_escape "MYSQL_PWD=$WIKI_DB_PASSWORD" mysqldump "$WIKI_DB_NAME" -u "$WIKI_DB_USER" '|' gzip > "$NEW_BACKUP_DIR/my.sql.gz"
+    
+    echo "Doing dumpBackup.php..."
+    remotely_no_escape php /var/www/html/wiki/maintenance/dumpBackup.php --full --quiet '|' gzip > "$NEW_BACKUP_DIR/dump.xml.gz"
+    
+    echo "Backing up remaining files..."
+    backup /var/www/html/wiki/
+  #+END_SRC
+
+  This script is admittedly getting a bit ugly, but it packs a lot of punch for
+  5 lines of code! The first =remotely_no_escape= command generates the SQL
+  dump, compresses it /on the remote host/, then saves the compressed backup
+  locally.
+
+  We have to use =remotely_no_escape= instead of plain =remotely= because
+  =remotely= does fancy SSH argument escaping ([[*SSH Word Splitting][described here]]) which would
+  prevent us from using the pipe or setting the environment variable ~MYSQL_PWD~.
+
+  Next, notice that the pipe is quoted, but the output redirection to
+  =my.sql.gz= is not. That's because the pipe is being passed to the remote
+  shell, but the output redirection is being executed locally. =$NEW_BACKUP_DIR=
+  is set by Remotely, and is the location where the current backup is being
+  saved.
+
+  
