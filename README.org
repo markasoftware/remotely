@@ -1,13 +1,30 @@
 #+TITLE: Remotely: A bash library for doing things over SSH.
 #+AUTHOR: Mark Polyakov
 
-It seems like everyone and their mother has their own DIY Ansible
-replacement these days. Remotely is mine. Since I don't manage a whole
-server farm, but rather just a few personal machines, I care more about
-simplicity and adhering to the Unix philosophy than working at scale or
-having orchestration features. Using remotely is as close as I can get
-to writing "just shell scripts" that can easily interact with a remote
-server, upload files, and supports file templating. Key features:
+Remotely is a tiny alternative to enterprise configuration management tools like
+Ansible and Puppet. I've designed it for my personal use case, which is managing
+a small personal server with some self-hosted services. Remotely is focused on
+simplicity and the unix philosophy instead of scalability.
+
+To configure a server you "just write a shell script"; Remotely simply provides
+a few extra functions that make it really easy to upload files. The next few
+lines showcase most of Remotely's features:
+
+#+BEGIN_SRC sh
+  #!/bin/bash
+  
+  source remotely.sh # Load Remotely
+  remotely_go # Establish an SSH to $REMOTELY_HOST
+  
+  upload /etc/nginx # Rsync files from local directory ./files/etc/nginx to remote /etc/nginx
+  remotely apt-get install -y nginx # Run a remote command
+#+END_SRC
+
+Now you know why it's named "Remotely" -- not to sound like a hip startup
+(because it's not), but because running a command on the remote machine is as
+simple as prefixing it with =remotely=.
+
+Key features:
 
 - "Playbooks" are just shell scripts.
 - It's a bash library with less than 200 lines of code. Not a framework.
@@ -15,17 +32,10 @@ server, upload files, and supports file templating. Key features:
 - =m4= for templating.
 - Fast, agentless, and with "ssh pipelining" (control sockets).
 
-I've designed remotely for my use case, which is putting my personal
-VPS's configuration under version control. You would probably want to
-modify remotely a bit before using it on a large group of machines.
-
-Remotely isn't named "Remotely" to make it sound like a hip startup -- rather,
-it's because it lets you run commands on a remote machine using the keyword
-=remotely=, like so:
-
-#+BEGIN_SRC sh
-  remotely apt install nginx
-#+END_SRC
+This README is the documentation for Remotely, but is written more like a blog
+post. If you prefer to learn by example, check out [[https://github.com/markasoftware/swirl][my personal server
+configuration]] or [[https://github.com/uwcubesat/selfhosted-config][the server configuration I manage for a club at my university]],
+both of which are managed entirely with Remotely.
 
 * Getting Started
 
@@ -241,69 +251,87 @@ disable the word splitting my using =remotely_no_escape=
 
 * Using Remotely in practice
 
-I do actively use Remotely to configure my main private VPS, which is
-probably hosting the page you're reading this on right now. You can find
-the full configuration at
-[[https://github.com/markasoftware/swirl][github.com/markasoftware/swirl]].
-The services I manage with Remotely include Syncthing (file sync), Nginx
-(website), Quassel (IRC bouncer), and Navidrome (music server).
+I do actively use Remotely to configure my main private VPS, which I use to host [[https://markasoftware.com][markasoftware.com]]
+and a number of private self-hosted services. You can find the full configuration at
+[[https://github.com/markasoftware/swirl][github.com/markasoftware/swirl]]. The services I manage with Remotely include
++ Syncthing (file sync)
++ Shadowsocks (proxy)
++ Quassel (IRC bouncer)
++ Navidrome (music server)
++ Transmission (bittorrent client)
++ Nginx (web server)
++ Certbot (for Letsencrypt SSL certificates)
++ Iptables (firewall)
++ Netdata (server monitoring)
+So you can get a pretty good idea of how to use Remotely effectively from my repository.
 
-I'm pretty happy with Remotely overall, but pain points do exist; some
-pieces of software just don't play nice with shell scripts. For example,
-Quassel uses PostgreSQL, which required:
+I'm pretty happy with Remotely overall, but pain points do exist; some pieces of software don't like
+to be configured from the command line, or the commands that you must use are not really idempotent
+(eg, they throw an error if run twice, or worse, perform some unintended action). For example,
+to create the PostgreSQL user and database for Quassel, I had to use:
 
 #+BEGIN_SRC sh
   remotely su - postgres -c "psql -c \"CREATE USER \\\"quassel-custom\\\" WITH PASSWORD '$QUASSEL_POSTGRES_PASSWORD'\"" || true
   remotely su - postgres -c 'createdb --owner quassel-custom quassel-custom' || true
 #+END_SRC
 
-I had to call into =psql=, use multiple layers of escaped quotes,
-and use =|| true= to ignore errors in case the user or database already
-exist! A dedicated Postgres library for Remotely would make this easier.
+Ew! I needed to call =psql=, use multiple layers of escaped quotes, and use =|| true= to ignore
+errors in case the user or database already exist! Further, this code actually even includes a
+subtle bug: If =$QUASSEL_POSTGRES_PASSWORD= includes an apostrophe, bad things will happen. A
+dedicated Postgres library for Remotely could abstract this away.
 
 ** Letsencrypt & Certbot
 
-Letsencrypt was a more substantial problem. While Certbot's =--nginx= plugin is
+Letsencrypt poses a more substantial problem. While Certbot's =--nginx= plugin is
 super useful when setting up a server manually, scripting the interaction
 between certbot and nginx has always been a nightmare for me.
 
-There are two goals, and I'm not sure it's possible to satisfy both:
-1. Simplicity: Avoid a "special case" that only runs the first time the server
-   is configured.
-2. Uptime: Keep the nginx server online during certificate renewal.
+# There are two goals, and I'm not sure it's possible to satisfy both:
+# 1. Simplicity: Avoid a "special case" that only runs the first time the server
+#    is configured.
+# 2. Uptime: Keep the nginx server online during certificate renewal.
 
-None of the options satisfy both requirements:
-1. Setup Nginx before Certbot using a bootstrap configuration which supports
-   HTTP only. Then run Certbot. Then reconfigure Nginx using a final
-   configuration with HTTPS.
-   - Con: Violates requirement 1: Script must be aware of whether this is the
-     "first" configuration or not, to know which Nginx configuration to apply.
-2. Run Certbot standalone the first time, then use webroot or nginx plugin
-   afterwards.
-   - Con: Violates requirement 1: Once again, the script must be aware of
-     whether this is the "first" configuration, to know whether to run Certbot
-     in standalone or webroot mode.
-3. Always run Certbot in standalone mode, and just shutdown the Nginx server for
-   a few seconds every time you need to renew your certificate.
-   - Con: Violates requirement 2: Requires at least a few seconds of downtime.
+# None of the options satisfy both requirements:
+# 1. Setup Nginx before Certbot using a bootstrap configuration which supports
+#    HTTP only. Then run Certbot. Then reconfigure Nginx using a final
+#    configuration with HTTPS.
+#    - Con: Violates requirement 1: Script must be aware of whether this is the
+#      "first" configuration or not, to know which Nginx configuration to apply.
+# 2. Run Certbot standalone the first time, then use webroot or nginx plugin
+#    afterwards.
+#    - Con: Violates requirement 1: Once again, the script must be aware of
+#      whether this is the "first" configuration, to know whether to run Certbot
+#      in standalone or webroot mode.
+# 3. Always run Certbot in standalone mode, and just shutdown the Nginx server for
+#    a few seconds every time you need to renew your certificate.
+#    - Con: Violates requirement 2: Requires at least a few seconds of downtime.
 
-For my server, requirement 1 (simplicity) is more important than requirement 2
-(uptime), so I chose the final option. By adding hooks to
-=/etc/letsencrypt/renewal-hooks= that shutdown and restart Nginx, I can always
-use Certbot standalone with barely any extra configuration. Option 2, is
-probably more suitable for production; it is just a bit more finnicky to get
-right initially. It would be great to have a Remotely library that provides such
-an option.
+As far as I can tell, there's a necessary tradeoff between simplicity in the
+configuration script and achieving 100% uptime when it comes to setting up
+Certbot and Nginx. I took the simpler option.
 
-After creating the renewal hooks, actually provisioning the certificates is as
-simple as
+In =/etc/letsencrypt/renewal-hooks/pre/nginx=: 
+
+#+BEGIN_SRC sh
+systemctl stop nginx
+#+END_SRC
+
+And =/etc/letsencrypt/renewal-hooks/post/nginx=:
+
+#+BEGIN_SRC sh
+systemctl start nginx
+#+END_SRC
+
+With these hooks in place, I can simply run =certbot= in standalone mode.
+Provisioning the certificates is as simple as
 
 #+BEGIN_SRC sh
 remotely certbot certonly --non-interactive --agree-tos --standalone \
 	 --cert-name my-cert -m "$LETSENCRYPT_EMAIL" -d "$LETSENCRYPT_DOMAINS"
 #+END_SRC
 
-And the nginx configuration should be hard-coded to use the SSL certificate.
+The nginx configuration can be blissfully unaware of how Certbot manages
+renewals. Simply hardcode in the path to the SSL certificates.
 
 * Backing up a server
   Remotely is just a library that makes it easy to do tasks involving a remote
