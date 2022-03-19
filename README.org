@@ -6,9 +6,8 @@ Ansible and Puppet. I've designed it for my personal use case, which is managing
 a small personal server with some self-hosted services. Remotely is focused on
 simplicity and the unix philosophy instead of scalability.
 
-To configure a server you "just write a shell script"; Remotely simply provides
-a few extra functions that make it really easy to upload files. The next few
-lines showcase most of Remotely's features:
+To configure a server you "just write a shell script"; Remotely simply provides a few extra
+functions that make it really easy to upload files and run remote commands.
 
 #+BEGIN_SRC sh
   #!/bin/bash
